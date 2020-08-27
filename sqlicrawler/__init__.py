@@ -115,7 +115,8 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     type=click.File('w+', encoding='utf-8'),
 )
 @click.option(
-    '--proxy',
+    '-p',
+    '--proxy_server',
     help='proxy server address, e.g. `socks5://localhost:9050` or simple `tor`',
 )
 @click.option(
@@ -143,13 +144,13 @@ async def main(
     input: io.TextIOBase,
     nav_timeout: int,
     output: io.TextIOBase,
-    proxy: Optional[str],
+    proxy_server: Optional[str],
     aiohttp_timeout: float,
     useragent: str,
     verbosity: int,
     workers_num: int,
 ) -> Optional[int]:
-    r'''
+    '''\b
       _____  ____  _      _  _____                    _
      / ____|/ __ \| |    (_)/ ____|                  | |
     | (___ | |  | | |     _| |     _ __ __ ___      _| | ___ _ __
@@ -165,7 +166,7 @@ async def main(
         map(normalize_url, filter(None, map(str.strip, input.readlines())))
     )
     writer = ResultWriter(output)
-    proxy = PROXY_MAPPING.get(proxy, proxy)
+    proxy_server: str = PROXY_MAPPING.get(proxy_server, proxy_server)
     blacklist_path: str = os.path.join(CONFIG_PATH, BLACKLIST_FILENAME)
     if not os.path.exists(blacklist_path):
         blacklist_path: str = os.path.join(CURRENT_PATH, BLACKLIST_FILENAME)
@@ -176,7 +177,7 @@ async def main(
         blacklist=blacklist,
         checks_num=checks_num,
         nav_timeout=nav_timeout,
-        proxy=proxy,
+        proxy_server=proxy_server,
         useragent=useragent,
         workers_num=workers_num,
         writer=writer,
@@ -193,18 +194,18 @@ class SQLiCrawler(object):
         blacklist: BlackList,
         checks_num: int,
         nav_timeout: int,
-        pages_num: int,
-        proxy: Optional[str],
+        proxy_server: Optional[str],
         useragent: Optional[str],
+        workers_num: int,
         writer: ResultWriter,
     ) -> None:
         self.aiohttp_timeout = aiohttp_timeout
         self.blacklist = blacklist
         self.checks_num = checks_num
         self.nav_timeout = nav_timeout
-        self.pages_num = pages_num
-        self.proxy = proxy
+        self.proxy_server = proxy_server
         self.useragent = useragent
+        self.workers_num = workers_num
         self.writer = writer
 
     async def crawl(self, urls: List[str], depth: int) -> None:
@@ -225,70 +226,69 @@ class SQLiCrawler(object):
             worker.cancel()
         logger.info('finished')
 
+    async def get_browser(self) -> Browser:
+        logger.info('launch new browser instance')
+        args: List[str] = [
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-setuid-sandbox',
+            '--no-sandbox',
+        ]
+        if self.proxy_server:
+            args.append(f'--proxy-server={self.proxy_server}')
+        browser: Browser = await launch(
+            headless=True, ignoreHTTPSErrors=True, args=args
+        )
+        return browser
+
+    async def get_page(self, browser: Browser) -> Page:
+        page: Page = (await browser.pages())[0]
+        if self.useragent:
+            # Если установить None, то к хуям все повиснет
+            await page.setUserAgent(self.useragent)
+        page.setDefaultNavigationTimeout(self.nav_timeout)
+        await page.setRequestInterception(True)
+        page.on('request', self.interception)
+        page.on('response', self.check_response)
+        return page
+
     async def worker(self) -> None:
         task_name: str = asyncio.Task.current_task().get_name()
         logger.info('worker started: %s', task_name)
-        # Вся эта затея для перезапуска браузера прикраше
+        # Краш страниц часто приводит к падению браузера, поэтому вместо
+        # создания новых страниц, запускаем дополнительные инстансы
+        browser: Browser = await self.get_browser()
+        page: Page = await self.get_page(browser)
         while True:
-            logger.info('create new page')
-            args: List[str] = [
-                '--disable-accelerated-2d-canvas',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-setuid-sandbox',
-                '--ignore-certificate-errors',
-                '--lang=en-US',
-                '--no-sandbox',
-            ]
-            if self.proxy:
-                args += [f'--proxy-server={self.proxy}']
-            browser = await launch(headless=True, args=args)
-            page: Page = await self.browser.newPage()
-            if self.useragent:
-                # Если установить None, то к хуям все повиснет
-                await page.setUserAgent(self.useragent)
-            page.setDefaultNavigationTimeout(self.nav_timeout)
-            await page.setRequestInterception(True)
-            page.on('request', self.interception)
-            page.on('response', self.check_sqli)
-            while True:
-                url: str
-                depth: int
-                # Если внутри try разместить, получим ошибку: task_done() called too many times...
-                url, depth = await self.url_queue.get()
-                try:
-                    if url in self.visited:
-                        logger.debug('already visited: %s', url)
-                        continue
-                    logger.debug('goto %s (%s)', url, task_name)
-                    response: Response = await page.goto(
-                        url, waitUntil='networkidle2'
-                    )
-                    if not response:
-                        logger.warning('empty response')
-                        continue
-                    # if not os.path.exists('screenshot.png'):
-                    #     await page.screenshot(path='screenshot.png')
-                    self.visited.add(url)
-                    self.visited.add(response.url)
-                    if not response.ok:
-                        continue
-                    if url == 'http://httpbin.org/ip':
-                        logger.info(
-                            'chromium ip: %s',
-                            (await response.json())['origin'],
-                        )
-                        continue
-                    ct: str
-                    _: Any
-                    ct, _ = cgi.parse_header(
-                        response.headers.get('content-type', '')
-                    )
-                    if ct != 'text/html':
-                        continue
-                    # fill and submit all forms
-                    await page.evaluate(
-                        """\
+            url: str
+            depth: int
+            # Если внутри try разместить, получим ошибку: task_done() called too many times...
+            url, depth = await self.url_queue.get()
+            try:
+                if url in self.visited:
+                    logger.debug('already visited: %s', url)
+                    continue
+                logger.debug('goto %s (%s)', url, task_name)
+                response: Response = await page.goto(
+                    url, waitUntil='networkidle2'
+                )
+                if not response:
+                    logger.warning('empty response')
+                    continue
+                self.visited.add(url)
+                self.visited.add(response.url)
+                if not response.ok:
+                    continue
+                ct: str
+                _: Any
+                ct, _ = cgi.parse_header(
+                    response.headers.get('content-type', '')
+                )
+                if ct != 'text/html':
+                    continue
+                # fill and submit all forms
+                await page.evaluate(
+                    """\
 () =>
   [...document.forms].forEach(form => {
     for (let input of form) {
@@ -338,26 +338,29 @@ class SQLiCrawler(object):
     }
     fetch(url, { method, body })
   })"""
-                    )
-                    if depth < 1:
-                        continue
-                    links = await page.evaluate(
-                        """\
+                )
+                if depth < 1:
+                    continue
+                links = await page.evaluate(
+                    """\
 () => [...document.getElementsByTagName('a')]
   .filter(a => a.hostname === location.hostname)
   .map(a => a.href)"""
-                    )
-                    for link in links:
-                        await self.url_queue.put((link, depth - 1))
-                except (PyppeteerError, PyppeteerTimeoutError) as e:
-                    # Страницы часто крашатся и хз что с ними делать
-                    logger.error(e)
-                    await page.close()
-                    break
-                except Exception as e:
-                    logger.exception(e)
-                finally:
-                    self.url_queue.task_done()
+                )
+                for link in links:
+                    await self.url_queue.put((link, depth - 1))
+                # await page.waitForNavigation()
+            except (PyppeteerError, PyppeteerTimeoutError) as e:
+                # Страницы часто крашатся и хз что с ними делать
+                logger.error(e)
+                await page.close()
+                await browser.close()
+                browser: Browser = await self.get_browser()
+                page: Page = await self.get_page(browser)
+            except Exception as e:
+                logger.error(e)
+            finally:
+                self.url_queue.task_done()
 
     async def interception(self, request: Request) -> None:
         # Ускоряем загрузку страницы, отменяя загрузку стилей, картинок, шрифтов и т.д.
@@ -375,7 +378,7 @@ class SQLiCrawler(object):
         else:
             await request.continue_()
 
-    async def check_sqli(self, response: Response) -> None:
+    async def check_response(self, response: Response) -> None:
         if response.status < 200 or response.status >= 500:
             logging.warning('bad status: %d', response.status)
             return
@@ -411,9 +414,9 @@ class SQLiCrawler(object):
                 else:
                     logging.warning(f'{data_type!r} is not supported')
                     return
-            if self.proxy:
+            if self.proxy_server:
                 connector = ProxyConnector.from_url(
-                    self.proxy, verify_ssl=False
+                    self.proxy_server, verify_ssl=False
                 )
             else:
                 connector = aiohttp.TCPConnector(verify_ssl=False)
@@ -456,7 +459,7 @@ class SQLiCrawler(object):
                         )
                         self.writer.write(entry)
         except Exception as e:
-            logger.exception(e)
+            logger.error(e)
 
     def inject(
         self, url: yarl.URL, payload: Payload
