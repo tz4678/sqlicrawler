@@ -1,3 +1,4 @@
 *google*
-*.facebook.*
+*facebook.*
 mc.yandex.ru
+*youtube.*

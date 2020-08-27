@@ -257,6 +257,7 @@ class SQLiCrawler(object):
         logger.info('worker started: %s', task_name)
         # Краш страниц часто приводит к падению браузера, поэтому вместо
         # создания новых страниц, запускаем дополнительные инстансы
+        # У меня была такая проблема, что выполнение основного потока зависало
         browser: Browser = await self.get_browser()
         page: Page = await self.get_page(browser)
         while True:
@@ -350,10 +351,11 @@ class SQLiCrawler(object):
                 for link in links:
                     await self.url_queue.put((link, depth - 1))
                 # await page.waitForNavigation()
-            except (PyppeteerError, PyppeteerTimeoutError) as e:
+            except PyppeteerError as e:
                 # Страницы часто крашатся и хз что с ними делать
                 logger.error(e)
-                await page.close()
+                # await page.close()
+                logger.info('close browser')
                 await browser.close()
                 browser: Browser = await self.get_browser()
                 page: Page = await self.get_page(browser)
