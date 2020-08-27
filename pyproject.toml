@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "sqlicrawler"
-version = "0.1.0"
+version = "0.1.1"
 description = "SQLi Crawler with JavaScript support."
 authors = ["Sergey M <tz4678@gmail.com>"]
 classifiers = [
@@ -29,4 +29,4 @@ requires = ["poetry>=0.12"]
 build-backend = "poetry.masonry.api"
 
 [tool.poetry.scripts]
-sqlicrawler="sqlicrawler:main"
+sqlicrawler="sqlicrawler:cli"

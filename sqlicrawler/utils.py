@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 
 import click
 import ujson as json
-import yarl
 
 from .types import Function
 
@@ -32,8 +31,7 @@ class BlackList:
         self.patterns = patterns
 
     def is_blacklisted(self, url: str) -> bool:
-        domain: str = yarl.URL(url).host
-        return any(regex.match(domain) for regex in self.patterns)
+        return any(regex.match(url) for regex in self.patterns)
 
     @classmethod
     def parse(cls, fp: io.TextIOBase) -> 'BlackList':
@@ -51,8 +49,7 @@ class BlackList:
 
     @staticmethod
     def _make_pattern(pat: str) -> re.Pattern:
-        # *.facebook.com -> re.compile('.*?\\.facebook\\.com$')
-        return re.compile(re.escape(pat).replace('\\*', '.*?') + '$')
+        return re.compile(re.escape(pat).replace('\\*', '.+?'))
 
 
 @dataclasses.dataclass

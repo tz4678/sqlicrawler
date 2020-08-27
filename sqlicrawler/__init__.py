@@ -123,6 +123,10 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     '-u', '--useragent', help='custom user agent',
 )
 @click.option(
+    '--user_data_dir',
+    help='user profile directory (for share session between instances)',
+)
+@click.option(
     '-v',
     '--verbosity',
     count=True,
@@ -138,7 +142,7 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     type=int,
 )
 @coro
-async def main(
+async def cli(
     checks_num: int,
     depth: int,
     input: io.TextIOBase,
@@ -147,6 +151,7 @@ async def main(
     proxy_server: Optional[str],
     aiohttp_timeout: float,
     useragent: str,
+    user_data_dir: Optional[str],
     verbosity: int,
     workers_num: int,
 ) -> Optional[int]:
@@ -179,6 +184,7 @@ async def main(
         nav_timeout=nav_timeout,
         proxy_server=proxy_server,
         useragent=useragent,
+        user_data_dir=user_data_dir,
         workers_num=workers_num,
         writer=writer,
     )
@@ -196,6 +202,7 @@ class SQLiCrawler(object):
         nav_timeout: int,
         proxy_server: Optional[str],
         useragent: Optional[str],
+        user_data_dir: Optional[str],
         workers_num: int,
         writer: ResultWriter,
     ) -> None:
@@ -205,6 +212,7 @@ class SQLiCrawler(object):
         self.nav_timeout = nav_timeout
         self.proxy_server = proxy_server
         self.useragent = useragent
+        self.user_data_dir = user_data_dir
         self.workers_num = workers_num
         self.writer = writer
 
@@ -234,6 +242,8 @@ class SQLiCrawler(object):
             '--disable-setuid-sandbox',
             '--no-sandbox',
         ]
+        if self.user_data_dir:
+            args.append(f'--user-data-dir={self.user_data_dir}')
         if self.proxy_server:
             args.append(f'--proxy-server={self.proxy_server}')
         browser: Browser = await launch(
@@ -254,10 +264,9 @@ class SQLiCrawler(object):
 
     async def worker(self) -> None:
         task_name: str = asyncio.Task.current_task().get_name()
-        logger.info('worker started: %s', task_name)
-        # Краш страниц часто приводит к падению браузера, поэтому вместо
-        # создания новых страниц, запускаем дополнительные инстансы
-        # У меня была такая проблема, что выполнение основного потока зависало
+        logger.info('%s started', task_name)
+        # Краш страниц часто приводит к падению браузера и зависанию, поэтому
+        # вместо создания новых страниц, запускаем дополнительные инстансы
         browser: Browser = await self.get_browser()
         page: Page = await self.get_page(browser)
         while True:
@@ -267,14 +276,14 @@ class SQLiCrawler(object):
             url, depth = await self.url_queue.get()
             try:
                 if url in self.visited:
-                    logger.debug('already visited: %s', url)
+                    logger.debug('%s ‒ already visited: %s', task_name, url)
                     continue
                 logger.debug('goto %s (%s)', url, task_name)
                 response: Response = await page.goto(
-                    url, waitUntil='networkidle2'
+                    url, waitUntil='domcontentloaded'
                 )
                 if not response:
-                    logger.warning('empty response')
+                    logger.warning('%s ‒ empty response', task_name)
                     continue
                 self.visited.add(url)
                 self.visited.add(response.url)
@@ -355,7 +364,7 @@ class SQLiCrawler(object):
                 # Страницы часто крашатся и хз что с ними делать
                 logger.error(e)
                 # await page.close()
-                logger.info('close browser')
+                logger.info('%s - restart browser', task_name)
                 await browser.close()
                 browser: Browser = await self.get_browser()
                 page: Page = await self.get_page(browser)

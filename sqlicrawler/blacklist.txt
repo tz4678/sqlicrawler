@@ -1,4 +1,4 @@
-*google*
-*facebook.*
-mc.yandex.ru
-*youtube.*
+*://www.google.*/
+*://www.facebook.*/
+https://mc.yandex.ru/
+*://*.youtube.*/
