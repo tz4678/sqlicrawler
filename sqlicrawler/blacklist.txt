@@ -1,4 +1,14 @@
+# copy this file into ~/.config/sqlicrawler for editing
+# Статстика
 *://www.google.*/
 *://www.facebook.*/
-https://mc.yandex.ru/
+*://mc.yandex.*/
+*://counter.yadro.ru/
+*://kraken.rambler.ru/
+# Ютуб
 *://*.youtube.*/
+*://*.youto.be/
+# Виджеты Вконтакте
+*://vk.com
+# Аналог reCaptcha
+*.hcaptcha.com/

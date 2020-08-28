@@ -19,8 +19,6 @@ import yarl
 from aiohttp_socks import ProxyConnector
 from pyppeteer import launch
 from pyppeteer.browser import Browser
-from pyppeteer.errors import PyppeteerError
-from pyppeteer.errors import TimeoutError as PyppeteerTimeoutError
 from pyppeteer.network_manager import Request, Response
 from pyppeteer.page import Page
 
@@ -80,7 +78,7 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
 @click.version_option(__version__)
 @click.option(
     '--aiohttp_timeout',
-    default=10.0,
+    default=5.0,
     help='aiohttp session timeout in seconds',
     type=float,
 )
@@ -102,10 +100,10 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     type=click.File('r', encoding='utf-8'),
 )
 @click.option(
-    '--nav_timeout',
-    default=10000,
-    help='page navigation timeout in milliseconds',
-    type=int,
+    '--navigation_timeout',
+    default=10.0,
+    help='page navigation timeout',
+    type=float,
 )
 @click.option(
     '-o',
@@ -145,8 +143,8 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
 async def cli(
     checks_num: int,
     depth: int,
+    navigation_timeout: float,
     input: io.TextIOBase,
-    nav_timeout: int,
     output: io.TextIOBase,
     proxy_server: Optional[str],
     aiohttp_timeout: float,
@@ -181,10 +179,10 @@ async def cli(
         aiohttp_timeout=aiohttp_timeout,
         blacklist=blacklist,
         checks_num=checks_num,
-        nav_timeout=nav_timeout,
+        navigation_timeout=navigation_timeout,
         proxy_server=proxy_server,
-        useragent=useragent,
         user_data_dir=user_data_dir,
+        useragent=useragent,
         workers_num=workers_num,
         writer=writer,
     )
@@ -199,20 +197,20 @@ class SQLiCrawler(object):
         aiohttp_timeout: float,
         blacklist: BlackList,
         checks_num: int,
-        nav_timeout: int,
+        navigation_timeout: int,
         proxy_server: Optional[str],
-        useragent: Optional[str],
         user_data_dir: Optional[str],
+        useragent: Optional[str],
         workers_num: int,
         writer: ResultWriter,
     ) -> None:
         self.aiohttp_timeout = aiohttp_timeout
         self.blacklist = blacklist
         self.checks_num = checks_num
-        self.nav_timeout = nav_timeout
+        self.navigation_timeout = navigation_timeout
         self.proxy_server = proxy_server
-        self.useragent = useragent
         self.user_data_dir = user_data_dir
+        self.useragent = useragent
         self.workers_num = workers_num
         self.writer = writer
 
@@ -242,6 +240,8 @@ class SQLiCrawler(object):
             '--disable-setuid-sandbox',
             '--no-sandbox',
         ]
+        if self.useragent:
+            args.append(f'--user-agent={self.useragent}')
         if self.user_data_dir:
             args.append(f'--user-data-dir={self.user_data_dir}')
         if self.proxy_server:
@@ -251,15 +251,13 @@ class SQLiCrawler(object):
         )
         return browser
 
-    async def get_page(self, browser: Browser) -> Page:
-        page: Page = (await browser.pages())[0]
-        if self.useragent:
-            # Если установить None, то к хуям все повиснет
-            await page.setUserAgent(self.useragent)
-        page.setDefaultNavigationTimeout(self.nav_timeout)
+    async def new_page(self, browser: Browser) -> Page:
+        logger.info('open new page')
+        page: Page = await browser.newPage()
+        # page.setDefaultNavigationTimeout()
         await page.setRequestInterception(True)
         page.on('request', self.interception)
-        page.on('response', self.check_response)
+        page.on('response', self.on_response)
         return page
 
     async def worker(self) -> None:
@@ -268,7 +266,8 @@ class SQLiCrawler(object):
         # Краш страниц часто приводит к падению браузера и зависанию, поэтому
         # вместо создания новых страниц, запускаем дополнительные инстансы
         browser: Browser = await self.get_browser()
-        page: Page = await self.get_page(browser)
+        page: Page = await self.new_page(browser)
+        counter: int = 0
         while True:
             url: str
             depth: int
@@ -278,9 +277,19 @@ class SQLiCrawler(object):
                 if url in self.visited:
                     logger.debug('%s ‒ already visited: %s', task_name, url)
                     continue
-                logger.debug('goto %s (%s)', url, task_name)
-                response: Response = await page.goto(
-                    url, waitUntil='domcontentloaded'
+                logger.debug(
+                    '%s ‒ goto %s (counter: %d)', task_name, url, counter
+                )
+                response: Response = await asyncio.wait_for(
+                    page.goto(url, waitUntil='networkidle2'),
+                    self.navigation_timeout,
+                )
+                counter += 1
+                logger.debug(
+                    '%s ‒ response recieved: %s %s',
+                    task_name,
+                    response.url,
+                    response.status,
                 )
                 if not response:
                     logger.warning('%s ‒ empty response', task_name)
@@ -359,17 +368,12 @@ class SQLiCrawler(object):
                 )
                 for link in links:
                     await self.url_queue.put((link, depth - 1))
-                # await page.waitForNavigation()
-            except PyppeteerError as e:
-                # Страницы часто крашатся и хз что с ними делать
-                logger.error(e)
-                # await page.close()
-                logger.info('%s - restart browser', task_name)
-                await browser.close()
-                browser: Browser = await self.get_browser()
-                page: Page = await self.get_page(browser)
             except Exception as e:
                 logger.error(e)
+                logger.info('restart browser after page crash')
+                # await page.close() вешает задание, после Navigation Timeout Exceeded
+                browser: Browser = await self.get_browser()
+                page: Page = await self.new_page(browser)
             finally:
                 self.url_queue.task_done()
 
@@ -389,70 +393,67 @@ class SQLiCrawler(object):
         else:
             await request.continue_()
 
-    async def check_response(self, response: Response) -> None:
-        if response.status < 200 or response.status >= 500:
-            logging.warning('bad status: %d', response.status)
-            return
-        content_type: str = cgi.parse_header(
-            response.headers.get('content-type', '')
-        )[0]
-        if content_type not in ['text/html', 'application/json']:
-            return
+    async def on_response(self, response: Response) -> None:
         try:
-            result: Dict[str, Any] = await response._client.send(
-                'Network.getCookies', {'urls': [response.url]}
-            )
-            # {'cookies': [{'name': 'cf_chl_1', 'value': '2869f5a1529140d', 'domain': 'javascript.ru', 'path': '/', 'expires': 1598448328, 'size': 23, 'httpOnly': False, 'secure': False, 'session': False}, {'name': 'vblastvisit', 'value': '1598443853', 'domain': '.javascript.ru', 'path': '/', 'expires': 1629979853.306669, 'size': 21, 'httpOnly': False, 'secure': False, 'session': False}, {'name': 'cf_chl_prog', 'value': 'b', 'domain': 'javascript.ru', 'path': '/', 'expires': 1598448332, 'size': 12, 'httpOnly': False, 'secure': False, 'session': False}, {'name': '__cfduid', 'value': 'd888c7b031e8db21e8c6d92d7d89991ba1598444719', 'domain': '.javascript.ru', 'path': '/', 'expires': 1601036719.306614, 'size': 51, 'httpOnly': True, 'secure': False, 'session': False, 'sameSite': 'Lax'}]}
-            cookies: Dict[str, str] = {
-                c['name']: c['value'] for c in result['cookies']
-            }
-            request: Request = response.request
-            url: yarl.URL = yarl.URL(request.url)
-            # {'referer': 'https://russiangeeks.com/', 'origin': 'https://russiangeeks.com', 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/71.0.3542.0 Safari/537.36', 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'}
-            data_type: str = cgi.parse_header(
-                request.headers.get('content-type', '')
+            if response.status < 200 or response.status >= 500:
+                logging.warning('bad status: %d', response.status)
+                return
+            ct: str = cgi.parse_header(
+                response.headers.get('content-type', '')
             )[0]
-            is_urlencoded: bool = data_type == 'application/x-www-form-urlencoded'
-            is_json: bool = data_type == 'application/json'
-            data: Payload = None
-            if request.postData:
-                if is_urlencoded:
-                    data = dict(
-                        parse_qsl(request.postData, keep_blank_values=True)
-                    )
-                elif is_json:
-                    data = json.loads(request.postData)
-                else:
-                    logging.warning(f'{data_type!r} is not supported')
-                    return
-            if self.proxy_server:
-                connector = ProxyConnector.from_url(
-                    self.proxy_server, verify_ssl=False
+            if ct not in ['text/html', 'application/json']:
+                return
+            await self.check_sqli(response)
+        except Exception as e:
+            logger.error(e)
+
+    async def check_sqli(self, response: Response) -> None:
+        result: Dict[str, Any] = await response._client.send(
+            'Network.getCookies', {'urls': [response.url]}
+        )
+        cookies: Dict[str, str] = {
+            c['name']: c['value'] for c in result['cookies']
+        }
+        request: Request = response.request
+        url: yarl.URL = yarl.URL(request.url)
+        data_type: str = cgi.parse_header(
+            request.headers.get('content-type', '')
+        )[0]
+        is_urlencoded: bool = data_type == 'application/x-www-form-urlencoded'
+        is_json: bool = data_type == 'application/json'
+        data: Payload = None
+        if request.postData:
+            if is_urlencoded:
+                data = dict(
+                    parse_qsl(request.postData, keep_blank_values=True)
                 )
+            elif is_json:
+                data = json.loads(request.postData)
             else:
-                connector = aiohttp.TCPConnector(verify_ssl=False)
-            timeout = aiohttp.ClientTimeout(total=self.aiohttp_timeout)
-            async with aiohttp.ClientSession(
-                connector=connector, timeout=timeout
-            ) as session:
-                if request.url == 'http://httpbin.org/ip':
-                    client_response: aiohttp.ClientResponse = await session.get(
-                        request.url
-                    )
-                    data: Dict[str, Any] = await client_response.json()
-                    logger.info('aiohttp.ClientSession ip: %s', data['origin'])
-                    return
-                logger.info('test sqli: %s', url)
-                injected_url: yarl.URL
-                injected_data: Payload
-                for injected_url, injected_data in itertools.islice(
-                    self.inject(url, data), self.checks_num
-                ):
+                logging.warning(f'{data_type!r} is not supported')
+                return
+        if self.proxy_server:
+            connector = ProxyConnector.from_url(
+                self.proxy_server, verify_ssl=False
+            )
+        else:
+            connector = aiohttp.TCPConnector(verify_ssl=False)
+        timeout = aiohttp.ClientTimeout(total=self.aiohttp_timeout)
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        ) as session:
+            logger.info('test sqli: %s', url)
+            injected_url: yarl.URL
+            injected_data: Payload
+            for injected_url, injected_data in itertools.islice(
+                self.inject(url, data), self.checks_num
+            ):
+                try:
                     data_key: str = 'json' if is_json else 'data'
                     client_response: aiohttp.ClientResponse = await session.request(
                         request.method,
                         injected_url,
-                        headers=request.headers,
+                        headers=request.headers,  # содержит content-type
                         cookies=cookies,
                         **{data_key: injected_data},
                     )
@@ -469,8 +470,8 @@ class SQLiCrawler(object):
                             match=match.group(),
                         )
                         self.writer.write(entry)
-        except Exception as e:
-            logger.error(e)
+                except Exception as e:
+                    logging.error(e)
 
     def inject(
         self, url: yarl.URL, payload: Payload

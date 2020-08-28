@@ -49,7 +49,7 @@ class BlackList:
 
     @staticmethod
     def _make_pattern(pat: str) -> re.Pattern:
-        return re.compile(re.escape(pat).replace('\\*', '.+?'))
+        return re.compile(re.escape(pat).replace(r'\*', '.+?'))
 
 
 @dataclasses.dataclass
