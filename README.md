@@ -6,7 +6,7 @@
 
 ![image](https://user-images.githubusercontent.com/12753171/91443290-cd3a6880-e87b-11ea-8ac1-703880a5ebee.png)
 
-Такой "видит" паук страницу выше:
+Такой паук "видит" страницу выше:
 
 ![image](https://user-images.githubusercontent.com/12753171/91443491-168ab800-e87c-11ea-8faf-1f0da95eb987.png)
 
