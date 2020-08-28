@@ -5,9 +5,11 @@ description = "SQLi Crawler with JavaScript support."
 authors = ["Sergey M <tz4678@gmail.com>"]
 classifiers = [
   "Topic :: Internet",
+  "Topic :: Security",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Topic :: Utilities"
 ]
+license = "Personal Use License"
 include = ["sqlicrawler/blacklist.txt"]
 
 [tool.poetry.dependencies]
