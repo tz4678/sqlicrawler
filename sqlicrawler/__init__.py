@@ -371,6 +371,10 @@ class SQLiCrawler(object):
             except Exception as e:
                 logger.error(e)
                 logger.info('restart browser after page crash')
+                try:
+                    browser.process.kill()
+                except Exception as e:
+                    logger.error(e)
                 # await page.close() вешает задание при ошибке Navigation Timeout Exceeded
                 browser: Browser = await self.get_browser()
                 page: Page = await self.new_page(browser)
