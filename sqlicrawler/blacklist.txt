@@ -1,5 +1,5 @@
 # copy this file into ~/.config/sqlicrawler for editing
-# Статстика
+# Статистика
 *://www.google.*/
 *://www.facebook.*/
 *://mc.yandex.*/
