@@ -267,7 +267,6 @@ class SQLiCrawler(object):
         # вместо создания новых страниц, запускаем дополнительные инстансы
         browser: Browser = await self.get_browser()
         page: Page = await self.new_page(browser)
-        counter: int = 0
         while True:
             url: str
             depth: int
@@ -277,14 +276,11 @@ class SQLiCrawler(object):
                 if url in self.visited:
                     logger.debug('%s ‒ already visited: %s', task_name, url)
                     continue
-                logger.debug(
-                    '%s ‒ goto %s (counter: %d)', task_name, url, counter
-                )
+                logger.debug('%s ‒ goto %s', task_name, url)
                 response: Response = await asyncio.wait_for(
                     page.goto(url, waitUntil='networkidle2'),
                     self.navigation_timeout,
                 )
-                counter += 1
                 logger.debug(
                     '%s ‒ response recieved: %s %s',
                     task_name,
