@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "sqlicrawler"
-version = "0.1.2"
+version = "0.1.3"
 description = "SQLi Crawler with JavaScript support."
 authors = ["Sergey M <tz4678@gmail.com>"]
 classifiers = [

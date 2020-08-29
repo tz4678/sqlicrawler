@@ -4,11 +4,23 @@ import io
 import itertools
 import logging
 import os
+import random
 import re
 import sys
+import weakref
 from functools import partial
 from os import getenv
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 from urllib.parse import parse_qsl, quote
 
 import aiohttp
@@ -35,6 +47,7 @@ from .utils import (
     BlackList,
     ResultEntry,
     ResultWriter,
+    VisitedUrls,
     coro,
     echo,
     normalize_url,
@@ -47,6 +60,67 @@ CONFIG_PATH: str = os.path.expanduser(
 )
 
 BLACKLIST_FILENAME: str = 'blacklist.txt'
+
+PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
+
+FILL_AND_SUBMIT_FORMS: str = """\
+() =>
+  [...document.forms].forEach(form => {
+    for (let input of form) {
+      if (!input.name) continue
+      if (input.tagName === 'INPUT') {
+        switch (input.type) {
+          case 'hidden':
+            continue
+          case 'email':
+            input.value = 'anonymous@mail.com'
+            break
+          case 'password':
+            input.value = '123456a'
+            break
+          case 'tel':
+            input.value = '+78005553535'
+            break
+          case 'url':
+            input.value = 'https://example.com'
+            break
+          case 'number':
+            input.value = 42
+            break
+          default:
+            if (/user_?name|login/i.test(input.name)) {
+              input.value = 'anonymous'
+            } else if (/fisrt_?name/i.test(input.name)) {
+              input.value = 'Anonymous'
+            } else if (/last_?name/i.test(input.name)) {
+              input.value = 'Anonymous'
+            } else {
+              input.value = 'test'
+            }
+        }
+      } else if (input.tagName == 'TEXTAREA') {
+        input.value = 'Test message'
+      }
+    }
+    let url = form.action || location.href,
+      method = (form.method || 'GET').toUpperCase(),
+      params = new URLSearchParams(new FormData(form)),
+      body = null
+    if (method === 'POST') {
+      body = params
+    } else {
+      url += (url.indexOf('?') === -1 ? '?' : '&') + params.toString()
+    }
+    fetch(url, { method, body })
+  })
+"""
+
+EXTRACT_INTRERNAL_LINKS: str = """\
+() => [...document.getElementsByTagName('a')].filter(
+    a => a.hasAttribute('href') && !a.hasAttribute('download') && a.hostname === location.hostname
+  ).map(a => a.href)
+"""
+
 QUOTE_CHARS: str = '\'"'
 
 SQLI_ERROR: re.Pattern = re.compile(
@@ -71,8 +145,6 @@ SQLI_ERROR: re.Pattern = re.compile(
     )
 )
 
-PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
-
 
 @click.command()
 @click.version_option(__version__)
@@ -90,7 +162,11 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     type=int,
 )
 @click.option(
-    '-d', '--depth', default=3, help='crawl depth', type=int,
+    '-d',
+    '--depth',
+    default=3,
+    help='crawl depth',
+    type=int,
 )
 @click.option(
     '-i',
@@ -98,6 +174,13 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     default=sys.stdin,
     help='input file',
     type=click.File('r', encoding='utf-8'),
+)
+@click.option(
+    '-m',
+    '--max_pages',
+    default=20,
+    help='maximum pages to visit per site (-1 is nolimit)',
+    type=int,
 )
 @click.option(
     '--navigation_timeout',
@@ -118,7 +201,9 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
     help='proxy server address, e.g. `socks5://localhost:9050` or simple `tor`',
 )
 @click.option(
-    '-u', '--useragent', help='custom user agent',
+    '-u',
+    '--useragent',
+    help='custom user agent',
 )
 @click.option(
     '--user_data_dir',
@@ -143,6 +228,7 @@ PROXY_MAPPING: Dict[str, str] = {'tor': 'socks5://localhost:9050'}
 async def cli(
     checks_num: int,
     depth: int,
+    max_pages: int,
     navigation_timeout: float,
     input: io.TextIOBase,
     output: io.TextIOBase,
@@ -153,14 +239,14 @@ async def cli(
     verbosity: int,
     workers_num: int,
 ) -> Optional[int]:
-    '''\b
+    """\b
       _____  ____  _      _  _____                    _
      / ____|/ __ \| |    (_)/ ____|                  | |
     | (___ | |  | | |     _| |     _ __ __ ___      _| | ___ _ __
      \___ \| |  | | |    | | |    | '__/ _` \ \ /\ / / |/ _ \ '__|
      ____) | |__| | |____| | |____| | | (_| |\ V  V /| |  __/ |
     |_____/ \___\_\______|_|\_____|_|  \__,_| \_/\_/ |_|\___|_|
-    '''
+    """
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     levels: List[int] = [logging.WARNING, logging.INFO, logging.DEBUG]
     level: int = levels[min(verbosity, len(levels) - 1)]
@@ -179,6 +265,7 @@ async def cli(
         aiohttp_timeout=aiohttp_timeout,
         blacklist=blacklist,
         checks_num=checks_num,
+        max_pages=max_pages,
         navigation_timeout=navigation_timeout,
         proxy_server=proxy_server,
         user_data_dir=user_data_dir,
@@ -197,6 +284,7 @@ class SQLiCrawler(object):
         aiohttp_timeout: float,
         blacklist: BlackList,
         checks_num: int,
+        max_pages: int,
         navigation_timeout: int,
         proxy_server: Optional[str],
         user_data_dir: Optional[str],
@@ -207,6 +295,7 @@ class SQLiCrawler(object):
         self.aiohttp_timeout = aiohttp_timeout
         self.blacklist = blacklist
         self.checks_num = checks_num
+        self.max_pages = max_pages
         self.navigation_timeout = navigation_timeout
         self.proxy_server = proxy_server
         self.user_data_dir = user_data_dir
@@ -219,18 +308,23 @@ class SQLiCrawler(object):
         url: str
         for url in urls:
             self.url_queue.put_nowait((url, depth))
-        self.visited: Tuple[str] = set()
+        self.visited = VisitedUrls(limit_per_site=self.max_pages)
+        self.checked_requests: Set[int] = set()
+        self.browsers = weakref.WeakSet()
         # Запускаем таски в фоновом режиме
         workers: List[asyncio.Task] = [
             asyncio.create_task(self.worker()) for _ in range(self.workers_num)
         ]
-        # Ждем пока очередь станет пустой
+        logger.info('wait until url queue becomes empty')
         await self.url_queue.join()
+        logger.info('cancel workers')
         worker: asyncio.Task
-        # Останавливаем фоновые задания
         for worker in workers:
             worker.cancel()
-        logger.info('finished')
+        logger.info('close browsers')
+        browser: Browser
+        for browser in self.browsers:
+            await browser.close()
 
     async def get_browser(self) -> Browser:
         logger.info('launch new browser instance')
@@ -249,6 +343,10 @@ class SQLiCrawler(object):
         browser: Browser = await launch(
             headless=True, ignoreHTTPSErrors=True, args=args
         )
+        # Инстансы браузера нужно обязательно останавливать чтобы не засирать
+        # stdin ошибками
+        # Удаленные сборщиком мусора объекты удаляются автоматически
+        self.browsers.add(browser)
         return browser
 
     async def new_page(self, browser: Browser) -> Page:
@@ -261,37 +359,43 @@ class SQLiCrawler(object):
         return page
 
     async def worker(self) -> None:
-        task_name: str = asyncio.Task.current_task().get_name()
-        logger.info('%s started', task_name)
         # Краш страниц часто приводит к падению браузера и зависанию, поэтому
         # вместо создания новых страниц, запускаем дополнительные инстансы
         browser: Browser = await self.get_browser()
         page: Page = await self.new_page(browser)
+        task_name: str = asyncio.Task.current_task().get_name()
         while True:
+            logger.info('%s is alive', task_name)
             url: str
             depth: int
-            # Если внутри try разместить, получим ошибку: task_done() called too many times...
             url, depth = await self.url_queue.get()
             try:
                 if url in self.visited:
-                    logger.debug('%s ‒ already visited: %s', task_name, url)
+                    logger.debug('already visited: %s', url)
                     continue
-                logger.debug('%s ‒ goto %s', task_name, url)
+                if not self.visited.can_add(url):
+                    print(
+                        'limit:',
+                        self.visited._limit_per_site,
+                        '\ncounter:',
+                        self.visited._counter['bitcoinisscam.com'],
+                    )
+                    logger.debug('max page limit exceeded, skip %s', url)
+                    continue
+                logger.debug('goto %s', url)
                 response: Response = await asyncio.wait_for(
                     page.goto(url, waitUntil='networkidle2'),
                     self.navigation_timeout,
                 )
                 logger.debug(
-                    '%s ‒ response recieved: %s %s',
-                    task_name,
+                    'response recieved: %s %s',
                     response.url,
                     response.status,
                 )
                 if not response:
-                    logger.warning('%s ‒ empty response', task_name)
+                    logger.warning('empty response')
                     continue
                 self.visited.add(url)
-                self.visited.add(response.url)
                 if not response.ok:
                     continue
                 ct: str
@@ -301,76 +405,19 @@ class SQLiCrawler(object):
                 )
                 if ct != 'text/html':
                     continue
-                # fill and submit all forms
-                await page.evaluate(
-                    """\
-() =>
-  [...document.forms].forEach(form => {
-    for (let input of form) {
-      if (!input.name) continue
-      if (input.tagName === 'INPUT') {
-        switch (input.type) {
-          case 'hidden':
-            continue
-          case 'email':
-            input.value = 'dummy@example.com'
-            break
-          case 'password':
-            input.value = '123456a'
-            break
-          case 'tel':
-            input.value = '+78005553535'
-            break
-          case 'url':
-            input.value = 'https://example.com'
-            break
-          case 'number':
-            input.value = 42
-            break
-          default:
-            if (/user_?name|login/i.test(input.name)) {
-              input.value = 'sema'
-            } else if (/fisrt_?name/i.test(input.name)) {
-              input.value = 'Semen'
-            } else if (/last_?name/i.test(input.name)) {
-              input.value = 'Semenov'
-            } else {
-              input.value = 'test'
-            }
-        }
-      } else if (input.tagName == 'TEXTAREA') {
-        input.value = 'Test message.'
-      }
-    }
-    let url = form.action || location.href,
-      method = (form.method || 'GET').toUpperCase(),
-      params = new URLSearchParams(new FormData(form)),
-      body = null
-    if (method === 'POST') {
-      body = params
-    } else {
-      url += (url.indexOf('?') === -1 ? '?' : '&') + params.toString()
-    }
-    fetch(url, { method, body })
-  })"""
-                )
+                await page.evaluate(FILL_AND_SUBMIT_FORMS)
                 if depth < 1:
                     continue
-                links = await page.evaluate(
-                    """\
-() => [...document.getElementsByTagName('a')]
-  .filter(a => a.hostname === location.hostname)
-  .map(a => a.href)"""
-                )
+                links: List[str] = await page.evaluate(EXTRACT_INTRERNAL_LINKS)
+                # перемешиваем ссылки
+                random.shuffle(links)
+                link: str
                 for link in links:
                     await self.url_queue.put((link, depth - 1))
             except Exception as e:
                 logger.error(e)
                 logger.info('restart browser after page crash')
-                try:
-                    browser.process.kill()
-                except Exception as e:
-                    logger.error(e)
+                await browser.close()
                 # await page.close() вешает задание при ошибке Navigation Timeout Exceeded
                 browser: Browser = await self.get_browser()
                 page: Page = await self.new_page(browser)
@@ -381,14 +428,18 @@ class SQLiCrawler(object):
         # Ускоряем загрузку страницы, отменяя загрузку стилей, картинок, шрифтов и т.д.
         # https://github.com/puppeteer/puppeteer/blob/f7857d27c4091ebcd219a8180e258f3b61a5de35/new-docs/puppeteer.httprequest.resourcetype.md
         # TODO: элементы могут быть скрыты через CSS
-        if request.resourceType in [
-            'eventsource',
-            'font',
-            'image',
-            'media',
-            'stylesheet',
-            'websocket',
-        ] or self.blacklist.is_blacklisted(request.url):
+        if (
+            request.resourceType
+            in [
+                'eventsource',
+                'font',
+                'image',
+                'media',
+                'stylesheet',
+                'websocket',
+            ]
+            or self.blacklist.is_blacklisted(request.url)
+        ):
             await request.abort()
         else:
             await request.continue_()
@@ -432,6 +483,10 @@ class SQLiCrawler(object):
             else:
                 logging.warning(f'{data_type!r} is not supported')
                 return
+        request_hash: int = self.hash_request(request, data)
+        if request_hash in self.checked_requests:
+            logging.debug('request already checked')
+            return
         if self.proxy_server:
             connector = ProxyConnector.from_url(
                 self.proxy_server, verify_ssl=False
@@ -442,7 +497,7 @@ class SQLiCrawler(object):
         async with aiohttp.ClientSession(
             connector=connector, timeout=timeout
         ) as session:
-            logger.info('test sqli: %s', url)
+            logger.info('check sqli: %s', url)
             injected_url: yarl.URL
             injected_data: Payload
             for injected_url, injected_data in itertools.islice(
@@ -450,28 +505,41 @@ class SQLiCrawler(object):
             ):
                 try:
                     data_key: str = 'json' if is_json else 'data'
-                    client_response: aiohttp.ClientResponse = await session.request(
+                    client_resp: aiohttp.ClientResponse
+                    async with session.request(
                         request.method,
                         injected_url,
                         headers=request.headers,  # содержит content-type
                         cookies=cookies,
                         **{data_key: injected_data},
-                    )
-                    content = await client_response.text()
-                    match: Union[None, re.Match]
-                    if (match := SQLI_ERROR.search(content)) is not None:
-                        logger.info('match: %s', match.group())
-                        entry = ResultEntry(
-                            status=client_response.status,
-                            url=str(injected_url),
-                            headers=request.headers,
-                            cookies=cookies,
-                            data=injected_data,
-                            match=match.group(),
-                        )
-                        self.writer.write(entry)
+                    ) as client_resp:
+                        content = await client_resp.text()
+                        match: Union[None, re.Match]
+                        if (match := SQLI_ERROR.search(content)) :
+                            error: str = match.group()
+                            logger.info('sqli found: %s', error)
+                            entry = ResultEntry(
+                                status=client_resp.status,
+                                url=str(injected_url),
+                                headers=request.headers,
+                                cookies=cookies,
+                                data=injected_data,
+                                error=error,
+                            )
+                            self.writer.write(entry)
                 except Exception as e:
                     logging.error(e)
+        self.checked_requests.add(request_hash)
+
+    def hash_request(self, request: Request, payload: Payload) -> int:
+        url = yarl.URL(request.url)
+        hashable: Dict[str, Any] = {
+            'method': request.method,
+            'url': str(url.with_query('').with_fragment('')),
+            'query': sorted(url.query),
+            'params': sorted(payload) if payload else None,
+        }
+        return hash(json.dumps(hashable, sort_keys=True))
 
     def inject(
         self, url: yarl.URL, payload: Payload
