@@ -1,6 +1,8 @@
 # copy this file into ~/.config/sqlicrawler for editing
 # Сервисы Google
 *://*.google.*/
+*.blogspot.*
+*.blogger.com/
 # Статистика
 *://mc.yandex.*/
 *://counter.yadro.ru/

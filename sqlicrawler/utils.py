@@ -56,49 +56,6 @@ class BlackList:
         return re.compile(re.escape(pat).replace(r'\*', '.+?'))
 
 
-class VisitedUrls:
-    def __init__(
-        self, urls: Optional[Sequence[str]] = [], limit_per_site: int = -1
-    ) -> None:
-        # set использует хеш таблицы и быстрее списков, где используется линейный поиск при lookup
-        # элемента
-        self._urls: Set[str] = set()
-        self._counter = Counter()
-        # threadsafe
-        self._lock = threading.RLock()
-        self._limit_per_site = limit_per_site
-        for url in urls:
-            self.add(url)
-
-    def add(self, url: str) -> None:
-        with self._lock:
-            if url in self._urls:
-                return
-            host: str = yarl.URL(url).host
-            if not self.can_add(url, host):
-                raise ValueError('per site limit exceeded')
-            self._counter[host] += 1
-            self._urls.add(url)
-
-    def can_add(self, url: str, host: Optional[str] = None) -> bool:
-        with self._lock:
-            if self._limit_per_site == -1:
-                return True
-            if host is None:
-                host = yarl.URL(url).host
-            return self._limit_per_site > self._counter[host]
-
-    def __contains__(self, value: str) -> bool:
-        # по идее атомарная операция
-        return value in self._urls
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._urls)
-
-    # TODO: add more methods
-
-
 @dataclasses.dataclass
 class ResultEntry:
     status: int

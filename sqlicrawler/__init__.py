@@ -47,7 +47,6 @@ from .utils import (
     BlackList,
     ResultEntry,
     ResultWriter,
-    VisitedUrls,
     coro,
     echo,
     normalize_url,
@@ -207,6 +206,7 @@ SQLI_ERROR: re.Pattern = re.compile(
 )
 @click.option(
     '--user_data_dir',
+    default=f'/tmp/{__package_name__}',
     help='user profile directory (for share session between instances)',
 )
 @click.option(
@@ -226,16 +226,16 @@ SQLI_ERROR: re.Pattern = re.compile(
 )
 @coro
 async def cli(
+    aiohttp_timeout: float,
     checks_num: int,
     depth: int,
+    input: io.TextIOBase,
     max_pages: int,
     navigation_timeout: float,
-    input: io.TextIOBase,
     output: io.TextIOBase,
     proxy_server: Optional[str],
-    aiohttp_timeout: float,
-    useragent: str,
     user_data_dir: Optional[str],
+    useragent: str,
     verbosity: int,
     workers_num: int,
 ) -> Optional[int]:
@@ -251,7 +251,7 @@ async def cli(
     levels: List[int] = [logging.WARNING, logging.INFO, logging.DEBUG]
     level: int = levels[min(verbosity, len(levels) - 1)]
     logger.setLevel(level)
-    urls: List[str] = list(
+    sites: List[str] = list(
         map(normalize_url, filter(None, map(str.strip, input.readlines())))
     )
     writer = ResultWriter(output)
@@ -265,6 +265,7 @@ async def cli(
         aiohttp_timeout=aiohttp_timeout,
         blacklist=blacklist,
         checks_num=checks_num,
+        depth=depth,
         max_pages=max_pages,
         navigation_timeout=navigation_timeout,
         proxy_server=proxy_server,
@@ -273,7 +274,7 @@ async def cli(
         workers_num=workers_num,
         writer=writer,
     )
-    await crawler.crawl(urls, depth)
+    await crawler.crawl(sites)
     logger.info('finished')
 
 
@@ -284,6 +285,7 @@ class SQLiCrawler(object):
         aiohttp_timeout: float,
         blacklist: BlackList,
         checks_num: int,
+        depth: int,
         max_pages: int,
         navigation_timeout: int,
         proxy_server: Optional[str],
@@ -295,6 +297,7 @@ class SQLiCrawler(object):
         self.aiohttp_timeout = aiohttp_timeout
         self.blacklist = blacklist
         self.checks_num = checks_num
+        self.depth = depth
         self.max_pages = max_pages
         self.navigation_timeout = navigation_timeout
         self.proxy_server = proxy_server
@@ -303,12 +306,11 @@ class SQLiCrawler(object):
         self.workers_num = workers_num
         self.writer = writer
 
-    async def crawl(self, urls: List[str], depth: int) -> None:
-        self.url_queue = asyncio.Queue()
+    async def crawl(self, sites: List[str]) -> None:
+        self.sites = asyncio.Queue()
         url: str
-        for url in urls:
-            self.url_queue.put_nowait((url, depth))
-        self.visited = VisitedUrls(limit_per_site=self.max_pages)
+        for url in sites:
+            await self.sites.put(url)
         self.checked_requests: Set[int] = set()
         self.browsers = weakref.WeakSet()
         # Запускаем таски в фоновом режиме
@@ -316,7 +318,7 @@ class SQLiCrawler(object):
             asyncio.create_task(self.worker()) for _ in range(self.workers_num)
         ]
         logger.info('wait until url queue becomes empty')
-        await self.url_queue.join()
+        await self.sites.join()
         logger.info('cancel workers')
         worker: asyncio.Task
         for worker in workers:
@@ -329,10 +331,14 @@ class SQLiCrawler(object):
     async def get_browser(self) -> Browser:
         logger.info('launch new browser instance')
         args: List[str] = [
+            '--disable-breakpad',
+            '--disable-crash-reporter',
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--disable-setuid-sandbox',
             '--no-sandbox',
+            '--no-startup-window',
+            '--window-size=1920,1080',
         ]
         if self.useragent:
             args.append(f'--user-agent={self.useragent}')
@@ -365,64 +371,76 @@ class SQLiCrawler(object):
         page: Page = await self.new_page(browser)
         task_name: str = asyncio.Task.current_task().get_name()
         while True:
-            logger.info('%s is alive', task_name)
-            url: str
-            depth: int
-            url, depth = await self.url_queue.get()
-            try:
-                if url in self.visited:
+            logger.debug('%s is alive', task_name)
+            site: str = await self.sites.get()
+            logger.info('crawl %s', site)
+            # Посещаем все ссылки сайта
+            urls: List[str] = [site]
+            visited: Set[str] = set()
+            depth: int = self.depth
+            while len(urls) > 0:
+                url: str = urls.pop(0)
+                if url in visited:
                     logger.debug('already visited: %s', url)
                     continue
-                if not self.visited.can_add(url):
-                    print(
-                        'limit:',
-                        self.visited._limit_per_site,
-                        '\ncounter:',
-                        self.visited._counter['bitcoinisscam.com'],
-                    )
+                if len(visited) >= self.max_pages:
                     logger.debug('max page limit exceeded, skip %s', url)
-                    continue
-                logger.debug('goto %s', url)
-                response: Response = await asyncio.wait_for(
-                    page.goto(url, waitUntil='networkidle2'),
-                    self.navigation_timeout,
-                )
-                logger.debug(
-                    'response recieved: %s %s',
-                    response.url,
-                    response.status,
-                )
-                if not response:
-                    logger.warning('empty response')
-                    continue
-                self.visited.add(url)
-                if not response.ok:
-                    continue
-                ct: str
-                _: Any
-                ct, _ = cgi.parse_header(
-                    response.headers.get('content-type', '')
-                )
-                if ct != 'text/html':
-                    continue
-                await page.evaluate(FILL_AND_SUBMIT_FORMS)
-                if depth < 1:
-                    continue
-                links: List[str] = await page.evaluate(EXTRACT_INTRERNAL_LINKS)
-                # перемешиваем ссылки
-                random.shuffle(links)
-                link: str
-                for link in links:
-                    await self.url_queue.put((link, depth - 1))
-            except Exception as e:
-                logger.error(e)
-                logger.info('restart browser after page crash')
-                await browser.close()
-                # await page.close() вешает задание при ошибке Navigation Timeout Exceeded
-                browser: Browser = await self.get_browser()
-                page: Page = await self.new_page(browser)
-            finally:
-                self.url_queue.task_done()
+                    break
+                try:
+                    logger.debug('goto %s', url)
+                    response: Response = await asyncio.wait_for(
+                        page.goto(
+                            url,
+                            waitUntil=['networkidle2', 'domcontentloaded'],
+                        ),
+                        self.navigation_timeout,
+                    )
+                    logger.debug(
+                        'response recieved: %s %s',
+                        response.url,
+                        response.status,
+                    )
+                    if not response:
+                        logger.warning('empty response')
+                        continue
+                    visited.add(url)
+                    if not response.ok:
+                        continue
+                    ct: str
+                    _: Any
+                    ct, _ = cgi.parse_header(
+                        response.headers.get('content-type', '')
+                    )
+                    if ct != 'text/html':
+                        continue
+                    await page.evaluate(FILL_AND_SUBMIT_FORMS)
+                    if depth > 0:
+                        links: List[str] = await page.evaluate(
+                            EXTRACT_INTRERNAL_LINKS
+                        )
+                        # перемешиваем ссылки
+                        random.shuffle(links)
+                        urls.extend(links)
+                        depth -= 1
+                except Exception as e:
+                    logger.error(e)
+                    logger.info('restart browser after page crash')
+                    # после краша страницы часто и браузер зависает
+                    try:
+                        await asyncio.wait_for(browser.close(), 15)
+                    except:
+                        logger.warning(
+                            'force kill browser process with pid=%r after close timeout',
+                            browser.process.pid,
+                        )
+                        # сдохни наконец, блядина
+                        browser.process.kill()
+                    # await page.close() вешает задание при ошибке Navigation Timeout Exceeded
+                    # при Navigation Timeout Exceeded надо закрывать страницу, но если повис
+                    # браузер этого сделать не получится
+                    browser: Browser = await self.get_browser()
+                    page: Page = await self.new_page(browser)
+            self.sites.task_done()
 
     async def interception(self, request: Request) -> None:
         # Ускоряем загрузку страницы, отменяя загрузку стилей, картинок, шрифтов и т.д.
@@ -481,11 +499,12 @@ class SQLiCrawler(object):
             elif is_json:
                 data = json.loads(request.postData)
             else:
-                logging.warning(f'{data_type!r} is not supported')
+                logger.warning(f'{data_type!r} is not supported')
                 return
         request_hash: int = self.hash_request(request, data)
+        logger.debug('resquest hash: %s', request_hash)
         if request_hash in self.checked_requests:
-            logging.debug('request already checked')
+            logger.debug('request already checked')
             return
         if self.proxy_server:
             connector = ProxyConnector.from_url(

@@ -15,10 +15,3 @@ def test_blacklist() -> None:
         blacklist.is_blacklisted('https://kraken.rambler.ru/cnt/?et=...')
         == True
     )
-
-
-def test_visited_urls() -> None:
-    visited = VisitedUrls(limit_per_site=1)
-    visited.add('http://example.com/foo')
-    with raises(ValueError, match='per site limit exceeded'):
-        visited.add('http://example.com/bar')
