@@ -11,6 +11,7 @@ classifiers = [
 ]
 license = "Personal Use License"
 include = ["sqlicrawler/blacklist.txt"]
+readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.8"
