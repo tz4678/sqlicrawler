@@ -16,6 +16,8 @@ from .types import Function
 # unused
 echo = partial(click.secho, err=True)
 
+option = partial(click.option, show_default=True)
+
 
 def coro(f: Function) -> Function:
     @wraps(f)

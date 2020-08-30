@@ -50,6 +50,7 @@ from .utils import (
     coro,
     echo,
     normalize_url,
+    option,
 )
 
 CURRENT_PATH: str = os.path.dirname(__file__)
@@ -57,6 +58,8 @@ CURRENT_PATH: str = os.path.dirname(__file__)
 CONFIG_PATH: str = os.path.expanduser(
     os.path.join(getenv('XDG_CONFIG_DIR', '~/.config'), __package_name__)
 )
+
+USER_DATA_DIR: str = os.path.join(CONFIG_PATH, 'chrome_profile')
 
 BLACKLIST_FILENAME: str = 'blacklist.txt'
 
@@ -147,76 +150,76 @@ SQLI_ERROR: re.Pattern = re.compile(
 
 @click.command()
 @click.version_option(__version__)
-@click.option(
+@option(
     '--aiohttp_timeout',
     default=5.0,
     help='aiohttp session timeout in seconds',
     type=float,
 )
-@click.option(
+@option(
     '--checks',
     'checks_num',
     default=3,
     help='number of sqli checks for each request',
     type=int,
 )
-@click.option(
+@option(
     '-d',
     '--depth',
     default=3,
     help='crawl depth',
     type=int,
 )
-@click.option(
+@option(
     '-i',
     '--input',
     default=sys.stdin,
     help='input file',
     type=click.File('r', encoding='utf-8'),
 )
-@click.option(
+@option(
     '-m',
     '--max_pages',
     default=20,
     help='maximum pages to visit per site (-1 is nolimit)',
     type=int,
 )
-@click.option(
+@option(
     '--navigation_timeout',
     default=10.0,
     help='page navigation timeout',
     type=float,
 )
-@click.option(
+@option(
     '-o',
     '--output',
     default=sys.stdout,
     help='output file',
     type=click.File('w+', encoding='utf-8'),
 )
-@click.option(
+@option(
     '-p',
     '--proxy_server',
-    help='proxy server address, e.g. `socks5://localhost:9050` or simple `tor`',
+    help='proxy server address e.g. `socks5://localhost:9050` or simple `tor`',
 )
-@click.option(
+@option(
     '-u',
     '--useragent',
     help='custom user agent',
 )
-@click.option(
+@option(
     '--user_data_dir',
-    default=f'/tmp/{__package_name__}',
-    help='user profile directory (for share session between instances)',
+    default=USER_DATA_DIR,
+    help='user profile directory for share session between instances',
 )
-@click.option(
+@option(
     '-v',
     '--verbosity',
     count=True,
     default=0,
     help='increase output verbosity: 0 - warning, 1 - info, 2 - debug',
 )
-@click.option(
+@option(
     '-w',
     '--workers',
     'workers_num',
@@ -379,14 +382,14 @@ class SQLiCrawler(object):
             visited: Set[str] = set()
             depth: int = self.depth
             while len(urls) > 0:
-                url: str = urls.pop(0)
-                if url in visited:
-                    logger.debug('already visited: %s', url)
-                    continue
-                if len(visited) >= self.max_pages:
-                    logger.debug('max page limit exceeded, skip %s', url)
-                    break
                 try:
+                    url: str = urls.pop(0)
+                    if url in visited:
+                        logger.debug('already visited: %s', url)
+                        continue
+                    if len(visited) >= self.max_pages:
+                        logger.debug('max page limit exceeded, skip %s', url)
+                        break
                     logger.debug('goto %s', url)
                     response: Response = await asyncio.wait_for(
                         page.goto(
