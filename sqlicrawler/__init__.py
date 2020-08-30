@@ -387,7 +387,7 @@ class SQLiCrawler(object):
                     if url in visited:
                         logger.debug('already visited: %s', url)
                         continue
-                    if len(visited) >= self.max_pages:
+                    if self.max_pages != -1 and len(visited) >= self.max_pages:
                         logger.debug('max page limit exceeded, skip %s', url)
                         break
                     logger.debug('goto %s', url)
