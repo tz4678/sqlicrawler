@@ -29,3 +29,7 @@ $ sqlicrawler --help
 ```zsh
 $ poetry run pytest -s tests
 ```
+
+## Warning
+
+Через WebRTC палится IP, расширение не работает, при headless false виснет. Либа глючное говно.
