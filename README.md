@@ -32,4 +32,4 @@ $ poetry run pytest -s tests
 
 ## Warning
 
-Через WebRTC палится IP, расширение не работает, при headless false виснет. Либа глючное говно.
+Через WebRTC палится IP, расширение не работает, при headless false виснет. Либа глючное говно. TODO: попробовать переписать на javadcript, использовать firefox вместо Хрома.
